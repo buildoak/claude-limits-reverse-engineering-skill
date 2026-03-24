@@ -100,6 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Observed tokens consumed. If omitted, uses recent usage in --days.",
     )
+    calibrate_parser.add_argument(
+        "--timestamp",
+        type=str,
+        help="ISO timestamp of the reading, e.g. '2026-03-24T18:20+07:00'. "
+        "If omitted, uses current time.",
+    )
 
     context_parser = subparsers.add_parser(
         "context",

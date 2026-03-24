@@ -22,6 +22,7 @@ from claude_monitor.core.pricing import PricingCalculator
 from claude_monitor.data.analysis import (
     BurnRateCalculator,
     CalibrationStore,
+    ComputeModel,
     ContextGauge,
     TokenLedger,
 )
@@ -51,6 +52,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     project_map = _build_project_map(entries_with_metadata)
     ledger = TokenLedger()
     pricing = PricingCalculator()
+    compute = ComputeModel()
 
     days = ledger.aggregate_by_day(entries, project_map=project_map)
     models = ledger.aggregate_by_model(entries)
@@ -58,6 +60,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     totals = _sum_token_counts(day.tokens for day in days)
     total_cost = round(sum(day.cost_usd for day in days), 6)
     total_messages = sum(day.message_count for day in days)
+    total_compute = compute.compute_units(entries)
 
     calibration_store = CalibrationStore()
     calibration_pool, estimated_limit = _select_calibration(calibration_store)
@@ -69,6 +72,15 @@ def cmd_report(args: argparse.Namespace) -> int:
         )
         for day in days
     }
+
+    compute_limit = calibration_store.estimate_compute_limit(
+        calibration_pool
+    ) if calibration_pool else None
+    compute_percent = (
+        (total_compute / compute_limit * 100.0)
+        if compute_limit is not None and compute_limit > 0
+        else None
+    )
 
     model_payload = {
         model: {
@@ -107,6 +119,9 @@ def cmd_report(args: argparse.Namespace) -> int:
         ),
         "calibration_pool": calibration_pool,
         "estimated_limit_tokens": estimated_limit,
+        "compute_units": round(total_compute, 1),
+        "compute_percent": round(compute_percent, 1) if compute_percent is not None else None,
+        "compute_limit": round(compute_limit, 1) if compute_limit is not None else None,
     }
 
     if args.json:
@@ -151,6 +166,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             "Estimated usage percent uses "
             f"'{calibration_pool}' median limit of {format_tokens(estimated_limit)} tokens."
         )
+    _print_compute_summary(console, total_compute, compute_percent, compute_limit)
     console.print(_create_model_summary_table(model_payload))
     console.print(_create_project_summary_table(project_payload))
     return 0
@@ -239,13 +255,18 @@ def cmd_burn(args: argparse.Namespace) -> int:
 
 
 def cmd_calibrate(args: argparse.Namespace) -> int:
-    """Save a calibration point."""
+    """Save a calibration point with token snapshot and compute units."""
+    cal_timestamp = _parse_calibration_timestamp(
+        getattr(args, "timestamp", None)
+    )
+
+    entries, _ = load_usage_entries(
+        data_path=args.data_path,
+        hours_back=_days_to_hours(args.days),
+    )
+
     tokens_consumed = args.tokens
     if tokens_consumed is None:
-        entries, _ = load_usage_entries(
-            data_path=args.data_path,
-            hours_back=_days_to_hours(args.days),
-        )
         tokens_consumed = sum(
             entry.input_tokens
             + entry.output_tokens
@@ -259,20 +280,32 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
                 args.json,
             )
 
+    compute = ComputeModel()
+    snapshot = compute.build_snapshot(entries)
+    cu = compute.compute_units(entries)
+
     store = CalibrationStore()
     point = store.save_calibration(
         percent=args.percent,
         pool=args.pool,
         tokens_consumed=tokens_consumed,
+        timestamp=cal_timestamp,
+        token_snapshot=snapshot,
+        compute_units=cu,
     )
     estimated_limit = store.estimate_limit(args.pool)
-    payload = {
+    estimated_cu_limit = store.estimate_compute_limit(args.pool)
+
+    payload: dict[str, Any] = {
         "pool": point.pool,
         "percent": point.percent,
         "tokens_consumed": point.tokens_consumed,
-        "timestamp": point.timestamp,
+        "compute_units": round(cu, 1),
+        "timestamp": point.timestamp.isoformat(),
         "reset_time": point.reset_time,
         "estimated_limit_tokens": estimated_limit,
+        "estimated_limit_compute": round(estimated_cu_limit, 1) if estimated_cu_limit else None,
+        "snapshot_models": list(snapshot.keys()) if snapshot else [],
     }
 
     if args.json:
@@ -284,11 +317,44 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         "Saved calibration: "
         f"pool={point.pool} percent={point.percent:.1f}% "
         f"tokens={format_tokens(point.tokens_consumed)} "
+        f"compute={cu:,.0f} CU "
         f"time={_format_local_time(point.timestamp)}"
     )
+    if snapshot:
+        console.print(f"  Snapshot models: {', '.join(sorted(snapshot.keys()))}")
     if estimated_limit is not None:
-        console.print(f"Estimated limit: {format_tokens(estimated_limit)} tokens")
+        console.print(f"  Estimated token limit: {format_tokens(estimated_limit)}")
+    if estimated_cu_limit is not None:
+        console.print(f"  Estimated compute limit: {estimated_cu_limit:,.0f} CU")
     return 0
+
+
+def _parse_calibration_timestamp(raw: str | None) -> datetime | None:
+    """Parse an optional --timestamp flag value into a UTC datetime."""
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _print_compute_summary(
+    console: Console,
+    total_compute: float,
+    compute_percent: float | None,
+    compute_limit: float | None,
+) -> None:
+    """Print the compute-unit summary line in reports."""
+    parts = [f"Compute units: {total_compute:,.0f}"]
+    if compute_percent is not None:
+        parts.append(f"est. {compute_percent:.1f}%")
+    if compute_limit is not None:
+        parts.append(f"of {compute_limit:,.0f} CU limit")
+    console.print("  ".join(parts))
 
 
 def cmd_context(args: argparse.Namespace) -> int:

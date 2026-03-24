@@ -23,6 +23,7 @@ from claude_monitor.core.models import (
     SessionBlock,
     SessionInfo,
     TokenCounts,
+    TokenSnapshot,
     UsageEntry,
     UsageProjection,
     normalize_model_name,
@@ -110,6 +111,109 @@ def _isoformat_or_none(value: datetime | None) -> str | None:
     if value is None:
         return None
     return _ensure_utc(value).isoformat()
+
+
+def _classify_model_family(model: str) -> str:
+    """Map a model string to its family: opus, sonnet, haiku, or other."""
+    lower = model.lower()
+    if "opus" in lower:
+        return "opus"
+    if "sonnet" in lower:
+        return "sonnet"
+    if "haiku" in lower:
+        return "haiku"
+    return "other"
+
+
+class ComputeModel:
+    """Map raw tokens to estimated compute units using calibrated weights.
+
+    The default formula (Formula A from calibration analysis) uses the
+    API rate-limit model: input + cache_creation counted at 1x, output at
+    5x, cache_read excluded, no per-model multiplier.  This showed the
+    best cross-validation score against real dashboard readings.
+    """
+
+    # Token-type weights (default: API rate-limit model)
+    TOKEN_WEIGHTS: dict[str, float] = {
+        "input": 1.0,
+        "output": 5.0,
+        "cache_creation": 1.0,
+        "cache_read": 0.0,
+    }
+
+    # Per-model multiplier (1.0 = no distinction)
+    MODEL_WEIGHTS: dict[str, float] = {
+        "opus": 1.0,
+        "sonnet": 1.0,
+        "haiku": 1.0,
+        "other": 1.0,
+    }
+
+    def __init__(
+        self,
+        token_weights: dict[str, float] | None = None,
+        model_weights: dict[str, float] | None = None,
+    ) -> None:
+        if token_weights is not None:
+            self.TOKEN_WEIGHTS = token_weights
+        if model_weights is not None:
+            self.MODEL_WEIGHTS = model_weights
+
+    def compute_units_for_entry(self, entry: UsageEntry) -> float:
+        """Compute weighted units for a single usage entry."""
+        family = _classify_model_family(entry.model)
+        model_mult = self.MODEL_WEIGHTS.get(family, 1.0)
+        return model_mult * (
+            entry.input_tokens * self.TOKEN_WEIGHTS["input"]
+            + entry.output_tokens * self.TOKEN_WEIGHTS["output"]
+            + entry.cache_creation_tokens * self.TOKEN_WEIGHTS["cache_creation"]
+            + entry.cache_read_tokens * self.TOKEN_WEIGHTS["cache_read"]
+        )
+
+    def compute_units(self, entries: list[UsageEntry]) -> float:
+        """Sum weighted compute units across all entries."""
+        return sum(self.compute_units_for_entry(e) for e in entries)
+
+    def compute_units_from_snapshot(
+        self, snapshot: dict[str, TokenSnapshot]
+    ) -> float:
+        """Compute units from a per-model token snapshot dict."""
+        total = 0.0
+        for family, snap in snapshot.items():
+            model_mult = self.MODEL_WEIGHTS.get(family, 1.0)
+            total += model_mult * (
+                snap.input_tokens * self.TOKEN_WEIGHTS["input"]
+                + snap.output_tokens * self.TOKEN_WEIGHTS["output"]
+                + snap.cache_creation_tokens * self.TOKEN_WEIGHTS["cache_creation"]
+                + snap.cache_read_tokens * self.TOKEN_WEIGHTS["cache_read"]
+            )
+        return total
+
+    def estimate_percent(
+        self,
+        entries: list[UsageEntry],
+        pool: str,
+        calibration_store: "CalibrationStore",
+    ) -> float | None:
+        """Estimate % of budget consumed using calibrated compute-unit limit."""
+        limit = calibration_store.estimate_compute_limit(pool)
+        if limit is None or limit <= 0:
+            return None
+        return (self.compute_units(entries) / limit) * 100.0
+
+    @staticmethod
+    def build_snapshot(entries: list[UsageEntry]) -> dict[str, TokenSnapshot]:
+        """Build a per-model-family token snapshot from usage entries."""
+        buckets: dict[str, TokenSnapshot] = {}
+        for entry in entries:
+            family = _classify_model_family(entry.model)
+            snap = buckets.setdefault(family, TokenSnapshot())
+            snap.input_tokens += entry.input_tokens
+            snap.output_tokens += entry.output_tokens
+            snap.cache_creation_tokens += entry.cache_creation_tokens
+            snap.cache_read_tokens += entry.cache_read_tokens
+        return buckets
 
 
 class TokenLedger:
@@ -426,6 +530,9 @@ class CalibrationStore:
         pool: str,
         tokens_consumed: int,
         reset_time: datetime | None = None,
+        timestamp: datetime | None = None,
+        token_snapshot: dict[str, TokenSnapshot] | None = None,
+        compute_units: float | None = None,
     ) -> CalibrationPoint:
         """Save a calibration point to disk."""
         self._validate_pool(pool)
@@ -438,8 +545,10 @@ class CalibrationStore:
             pool=pool,
             percent=float(percent),
             tokens_consumed=int(tokens_consumed),
-            timestamp=_utc_now(),
+            timestamp=_ensure_utc(timestamp) if timestamp is not None else _utc_now(),
             reset_time=_ensure_utc(reset_time) if reset_time is not None else None,
+            token_snapshot=token_snapshot,
+            compute_units=compute_units,
         )
 
         payload = self._load_payload()
@@ -477,12 +586,32 @@ class CalibrationStore:
             return None
         return int(round(median(estimates)))
 
+    def estimate_compute_limit(self, pool: str) -> float | None:
+        """Estimate a compute-unit limit from calibration points that have CU data."""
+        self._validate_pool(pool)
+        points = self.load_calibrations().get(pool, [])
+        estimates = [
+            point.compute_units / (point.percent / 100.0)
+            for point in points
+            if point.percent > 0 and point.compute_units is not None and point.compute_units > 0
+        ]
+        if not estimates:
+            return None
+        return median(estimates)
+
     def get_usage_percent(self, tokens_used: int, pool: str) -> float | None:
         """Estimate usage percent for a pool from the median inferred limit."""
         estimated_limit = self.estimate_limit(pool)
         if estimated_limit is None or estimated_limit <= 0:
             return None
         return (tokens_used / estimated_limit) * 100.0
+
+    def get_compute_usage_percent(self, compute_units: float, pool: str) -> float | None:
+        """Estimate usage percent from compute units and calibrated limit."""
+        limit = self.estimate_compute_limit(pool)
+        if limit is None or limit <= 0:
+            return None
+        return (compute_units / limit) * 100.0
 
     def _load_payload(self) -> list[dict[str, Any]]:
         """Read the raw calibration payload from disk."""
@@ -501,13 +630,26 @@ class CalibrationStore:
     @staticmethod
     def _serialize_point(point: CalibrationPoint) -> dict[str, Any]:
         """Convert a calibration point to JSON-safe data."""
-        return {
+        data: dict[str, Any] = {
             "pool": point.pool,
             "percent": point.percent,
             "tokens_consumed": point.tokens_consumed,
             "timestamp": point.timestamp.isoformat(),
             "reset_time": _isoformat_or_none(point.reset_time),
         }
+        if point.token_snapshot is not None:
+            data["token_snapshot"] = {
+                family: {
+                    "input_tokens": snap.input_tokens,
+                    "output_tokens": snap.output_tokens,
+                    "cache_creation_tokens": snap.cache_creation_tokens,
+                    "cache_read_tokens": snap.cache_read_tokens,
+                }
+                for family, snap in point.token_snapshot.items()
+            }
+        if point.compute_units is not None:
+            data["compute_units"] = point.compute_units
+        return data
 
     def _deserialize_point(self, data: dict[str, Any]) -> CalibrationPoint | None:
         """Convert stored JSON data into a calibration point."""
@@ -525,12 +667,30 @@ class CalibrationStore:
         except (KeyError, TypeError, ValueError):
             return None
 
+        token_snapshot: dict[str, TokenSnapshot] | None = None
+        raw_snapshot = data.get("token_snapshot")
+        if isinstance(raw_snapshot, dict):
+            token_snapshot = {}
+            for family, snap_data in raw_snapshot.items():
+                if isinstance(snap_data, dict):
+                    token_snapshot[family] = TokenSnapshot(
+                        input_tokens=int(snap_data.get("input_tokens", 0)),
+                        output_tokens=int(snap_data.get("output_tokens", 0)),
+                        cache_creation_tokens=int(snap_data.get("cache_creation_tokens", 0)),
+                        cache_read_tokens=int(snap_data.get("cache_read_tokens", 0)),
+                    )
+
+        raw_cu = data.get("compute_units")
+        compute_units = float(raw_cu) if raw_cu is not None else None
+
         return CalibrationPoint(
             pool=pool,
             percent=percent,
             tokens_consumed=tokens_consumed,
             timestamp=timestamp,
             reset_time=self._parse_datetime(data.get("reset_time")),
+            token_snapshot=token_snapshot,
+            compute_units=compute_units,
         )
 
     @staticmethod
@@ -760,6 +920,7 @@ class _DayAccumulator:
 __all__ = [
     "BurnRateCalculator",
     "CalibrationStore",
+    "ComputeModel",
     "ContextGauge",
     "TokenLedger",
     "analyze_usage",

@@ -110,6 +110,25 @@ class SessionInfo:
 
 
 @dataclass
+class TokenSnapshot:
+    """Per-model token breakdown captured at a calibration point."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_tokens
+            + self.cache_read_tokens
+        )
+
+
+@dataclass
 class CalibrationPoint:
     """User calibration snapshot for estimating pool limits."""
 
@@ -118,6 +137,8 @@ class CalibrationPoint:
     tokens_consumed: int
     timestamp: datetime
     reset_time: Optional[datetime] = None
+    token_snapshot: Optional[Dict[str, "TokenSnapshot"]] = None
+    compute_units: Optional[float] = None
 
 
 @dataclass
