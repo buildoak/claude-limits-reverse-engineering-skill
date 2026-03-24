@@ -19,7 +19,7 @@ from claude_monitor.core.data_processors import (
 from claude_monitor.core.models import CostMode, UsageEntry
 from claude_monitor.core.pricing import PricingCalculator
 from claude_monitor.error_handling import report_file_error
-from claude_monitor.utils.time_utils import TimezoneHandler
+from claude_monitor.utils.time_utils import TimezoneHandler, get_system_timezone
 
 FIELD_COST_USD = "cost_usd"
 FIELD_MODEL = "model"
@@ -27,6 +27,30 @@ TOKEN_INPUT = "input_tokens"
 TOKEN_OUTPUT = "output_tokens"
 
 logger = logging.getLogger(__name__)
+
+
+def extract_project_name(file_path: Path) -> str:
+    """Extract the project name from a Claude conversation file path."""
+    resolved_path = file_path.expanduser()
+    parts = resolved_path.parts
+    project_dir = ""
+
+    if "projects" in parts:
+        projects_index = parts.index("projects")
+        if projects_index + 1 < len(parts):
+            project_dir = parts[projects_index + 1]
+
+    if not project_dir or project_dir == "subagent":
+        parent = resolved_path.parent
+        project_dir = (
+            parent.parent.name if parent.name == "subagent" and len(parent.parents) > 1 else parent.name
+        )
+
+    segments = [segment for segment in project_dir.split("-") if segment]
+    if segments:
+        return segments[-1]
+
+    return project_dir or "unknown"
 
 
 def load_usage_entries(
@@ -47,7 +71,7 @@ def load_usage_entries(
         Tuple of (usage_entries, raw_data) where raw_data is None unless include_raw=True
     """
     data_path = Path(data_path if data_path else "~/.claude/projects").expanduser()
-    timezone_handler = TimezoneHandler()
+    timezone_handler = TimezoneHandler(get_system_timezone())
     pricing_calculator = PricingCalculator()
 
     cutoff_time = None
@@ -82,6 +106,52 @@ def load_usage_entries(
     logger.info(f"Processed {len(all_entries)} entries from {len(jsonl_files)} files")
 
     return all_entries, raw_entries
+
+
+def load_usage_entries_with_metadata(
+    data_path: Optional[str] = None,
+    hours_back: Optional[int] = None,
+    mode: CostMode = CostMode.AUTO,
+) -> List[Tuple[UsageEntry, str, str]]:
+    """Load usage entries and include source file and project metadata."""
+    data_root = Path(data_path if data_path else "~/.claude/projects").expanduser()
+    timezone_handler = TimezoneHandler(get_system_timezone())
+    pricing_calculator = PricingCalculator()
+
+    cutoff_time = None
+    if hours_back:
+        cutoff_time = datetime.now(tz.utc) - timedelta(hours=hours_back)
+
+    jsonl_files = _find_jsonl_files(data_root)
+    if not jsonl_files:
+        logger.warning("No JSONL files found in %s", data_root)
+        return []
+
+    entries_with_metadata: List[Tuple[UsageEntry, str, str]] = []
+    processed_hashes: Set[str] = set()
+
+    for file_path in jsonl_files:
+        entries, _ = _process_single_file(
+            file_path,
+            mode,
+            cutoff_time,
+            processed_hashes,
+            False,
+            timezone_handler,
+            pricing_calculator,
+        )
+        project_name = extract_project_name(file_path)
+        entries_with_metadata.extend(
+            (entry, str(file_path), project_name) for entry in entries
+        )
+
+    entries_with_metadata.sort(key=lambda item: item[0].timestamp)
+    logger.info(
+        "Processed %s entries with metadata from %s files",
+        len(entries_with_metadata),
+        len(jsonl_files),
+    )
+    return entries_with_metadata
 
 
 def load_all_raw_entries(data_path: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -201,6 +271,8 @@ def _should_process_entry(
         if timestamp_str:
             processor = TimestampProcessor(timezone_handler)
             timestamp = processor.parse_timestamp(timestamp_str)
+            if timestamp:
+                timestamp = timezone_handler.ensure_utc(timestamp)
             if timestamp and timestamp < cutoff_time:
                 return False
 
@@ -239,6 +311,7 @@ def _map_to_usage_entry(
         timestamp = timestamp_processor.parse_timestamp(data.get("timestamp", ""))
         if not timestamp:
             return None
+        timestamp = timezone_handler.ensure_utc(timestamp)
 
         token_data = TokenExtractor.extract_tokens(data)
         if not any(v for k, v in token_data.items() if k != "total_tokens"):

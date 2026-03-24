@@ -63,6 +63,24 @@ class PricingCalculator:
             "claude-3-haiku": self.FALLBACK_PRICING["haiku"],
             "claude-3-5-sonnet": self.FALLBACK_PRICING["sonnet"],
             "claude-3-5-haiku": self.FALLBACK_PRICING["haiku"],
+            "claude-opus-4-6": {
+                "input": 15.0,
+                "output": 75.0,
+                "cache_creation": 18.75,
+                "cache_read": 1.50,
+            },
+            "claude-sonnet-4-6": {
+                "input": 3.0,
+                "output": 15.0,
+                "cache_creation": 3.75,
+                "cache_read": 0.30,
+            },
+            "claude-haiku-4-6": {
+                "input": 0.25,
+                "output": 1.25,
+                "cache_creation": 0.30,
+                "cache_read": 0.03,
+            },
             "claude-sonnet-4-20250514": self.FALLBACK_PRICING["sonnet"],
             "claude-opus-4-20250514": self.FALLBACK_PRICING["opus"],
         }

@@ -3,7 +3,7 @@ Core data structures for usage tracking, session management, and token calculati
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -66,6 +66,71 @@ class UsageProjection:
     projected_total_tokens: int
     projected_total_cost: float
     remaining_minutes: float
+
+
+@dataclass
+class DayTokens:
+    """Daily token aggregation with model and project breakdowns."""
+
+    date: date
+    tokens: "TokenCounts"
+    by_model: Dict[str, "TokenCounts"]
+    by_project: Dict[str, "TokenCounts"]
+    message_count: int
+    cost_usd: float
+
+
+@dataclass
+class ProjectTokens:
+    """Aggregated project usage information."""
+
+    name: str
+    tokens: "TokenCounts"
+    message_count: int
+    cost_usd: float
+    sessions: List[str] = field(default_factory=list)
+
+
+@dataclass
+class SessionInfo:
+    """Conversation-level session summary."""
+
+    session_id: str
+    project: str
+    models: List[str]
+    start_time: datetime
+    end_time: datetime
+    tokens: "TokenCounts"
+    message_count: int
+    cost_usd: float
+    is_active: bool
+    is_subagent: bool
+    context_size: int
+    entries: List["UsageEntry"] = field(default_factory=list)
+
+
+@dataclass
+class CalibrationPoint:
+    """User calibration snapshot for estimating pool limits."""
+
+    pool: str
+    percent: float
+    tokens_consumed: int
+    timestamp: datetime
+    reset_time: Optional[datetime] = None
+
+
+@dataclass
+class BurnRateInfo:
+    """Current or baseline token velocity information."""
+
+    tokens_per_hour: float
+    tokens_per_day: float
+    cost_per_hour: float
+    cost_per_day: float
+    baseline_tokens_per_day: Optional[float]
+    anomaly: bool
+    anomaly_ratio: Optional[float]
 
 
 @dataclass

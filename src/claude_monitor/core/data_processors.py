@@ -197,7 +197,7 @@ class DataConverter:
 
     @staticmethod
     def extract_model_name(
-        data: Dict[str, Any], default: str = "claude-3-5-sonnet"
+        data: Dict[str, Any], default: str = "claude-sonnet-4-6"
     ) -> str:
         """Extract model name from various data sources.
 

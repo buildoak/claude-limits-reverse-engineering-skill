@@ -1,198 +1,705 @@
-"""
-Usage analysis functionality for Claude Monitor.
-Contains the main analyze_usage function and related analysis components.
-"""
+"""Analytics engine for token and session usage data."""
 
-import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from __future__ import annotations
 
-from claude_monitor.core.calculations import BurnRateCalculator
-from claude_monitor.core.models import CostMode, SessionBlock, UsageEntry
+import json
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from statistics import median
+from typing import Any
+
+from claude_monitor.core.calculations import (
+    BurnRateCalculator as BlockBurnRateCalculator,
+)
+from claude_monitor.core.models import (
+    BurnRate,
+    BurnRateInfo,
+    CalibrationPoint,
+    CostMode,
+    DayTokens,
+    ProjectTokens,
+    SessionBlock,
+    SessionInfo,
+    TokenCounts,
+    UsageEntry,
+    UsageProjection,
+    normalize_model_name,
+)
+from claude_monitor.core.pricing import PricingCalculator
 from claude_monitor.data.analyzer import SessionAnalyzer
 from claude_monitor.data.reader import load_usage_entries
 
-logger = logging.getLogger(__name__)
+_ACTIVE_SESSION_WINDOW = timedelta(minutes=30)
+_CALIBRATION_POOLS = {"session", "weekly-all", "weekly-sonnet"}
+
+
+def _utc_now() -> datetime:
+    """Return the current time in UTC."""
+    return datetime.now(timezone.utc)
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    """Normalize datetimes to timezone-aware UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _new_token_counts() -> TokenCounts:
+    """Create an empty token counter."""
+    return TokenCounts()
+
+
+def _add_entry_to_counts(counts: TokenCounts, entry: UsageEntry) -> None:
+    """Accumulate usage entry tokens into a counter."""
+    counts.input_tokens += entry.input_tokens
+    counts.output_tokens += entry.output_tokens
+    counts.cache_creation_tokens += entry.cache_creation_tokens
+    counts.cache_read_tokens += entry.cache_read_tokens
+
+
+def _resolve_entry_mapping(
+    entry: UsageEntry, mapping: dict[str, str] | None
+) -> str | None:
+    """Resolve an entry against a request/message keyed mapping."""
+    if not mapping:
+        return None
+
+    for key in (entry.request_id, entry.message_id):
+        if key and key in mapping:
+            return mapping[key]
+    return None
+
+
+def _entry_cost(entry: UsageEntry, pricing_calculator: PricingCalculator) -> float:
+    """Return an entry cost, calculating it when cached cost is absent."""
+    if entry.cost_usd > 0:
+        return round(float(entry.cost_usd), 6)
+
+    return pricing_calculator.calculate_cost(
+        model=entry.model,
+        input_tokens=entry.input_tokens,
+        output_tokens=entry.output_tokens,
+        cache_creation_tokens=entry.cache_creation_tokens,
+        cache_read_tokens=entry.cache_read_tokens,
+    )
+
+
+def _total_cost(
+    entries: list[UsageEntry], pricing_calculator: PricingCalculator
+) -> float:
+    """Sum entry costs with stable rounding."""
+    return round(sum(_entry_cost(entry, pricing_calculator) for entry in entries), 6)
+
+
+def _total_tokens(entries: list[UsageEntry]) -> int:
+    """Return the total token volume for a list of entries."""
+    return sum(
+        entry.input_tokens
+        + entry.output_tokens
+        + entry.cache_creation_tokens
+        + entry.cache_read_tokens
+        for entry in entries
+    )
+
+
+def _isoformat_or_none(value: datetime | None) -> str | None:
+    """Serialize a UTC datetime if present."""
+    if value is None:
+        return None
+    return _ensure_utc(value).isoformat()
+
+
+class TokenLedger:
+    """Aggregate usage entries across common reporting dimensions."""
+
+    def __init__(self, pricing_calculator: PricingCalculator | None = None) -> None:
+        self.pricing_calculator = pricing_calculator or PricingCalculator()
+
+    def aggregate_by_day(
+        self,
+        entries: list[UsageEntry],
+        project_map: dict[str, str] | None = None,
+    ) -> list[DayTokens]:
+        """Group entries by UTC day with model and project breakdowns."""
+        grouped: dict[date, _DayAccumulator] = {}
+
+        for entry in sorted(entries, key=lambda item: _ensure_utc(item.timestamp)):
+            day_key = _ensure_utc(entry.timestamp).date()
+            accumulator = grouped.setdefault(day_key, _DayAccumulator())
+            model_name = normalize_model_name(entry.model) or "unknown"
+            project_name = _resolve_entry_mapping(entry, project_map) or "unknown"
+
+            _add_entry_to_counts(accumulator.tokens, entry)
+            _add_entry_to_counts(
+                accumulator.by_model.setdefault(model_name, _new_token_counts()), entry
+            )
+            _add_entry_to_counts(
+                accumulator.by_project.setdefault(project_name, _new_token_counts()),
+                entry,
+            )
+            accumulator.message_count += 1
+            accumulator.cost_usd = round(
+                accumulator.cost_usd + _entry_cost(entry, self.pricing_calculator), 6
+            )
+
+        return [
+            DayTokens(
+                date=day_key,
+                tokens=accumulator.tokens,
+                by_model=accumulator.by_model,
+                by_project=accumulator.by_project,
+                message_count=accumulator.message_count,
+                cost_usd=accumulator.cost_usd,
+            )
+            for day_key, accumulator in sorted(grouped.items())
+        ]
+
+    def aggregate_by_model(self, entries: list[UsageEntry]) -> dict[str, TokenCounts]:
+        """Group entries by normalized model name."""
+        grouped: dict[str, TokenCounts] = {}
+
+        for entry in entries:
+            model_name = normalize_model_name(entry.model) or "unknown"
+            _add_entry_to_counts(
+                grouped.setdefault(model_name, _new_token_counts()), entry
+            )
+
+        return dict(sorted(grouped.items()))
+
+    def aggregate_by_project(
+        self,
+        entries: list[UsageEntry],
+        project_map: dict[str, str] | None = None,
+    ) -> dict[str, ProjectTokens]:
+        """Group entries by project name."""
+        grouped: dict[str, ProjectTokens] = {}
+        project_sessions: dict[str, set[str]] = defaultdict(set)
+
+        for entry in entries:
+            project_name = _resolve_entry_mapping(entry, project_map) or "unknown"
+            project = grouped.setdefault(
+                project_name,
+                ProjectTokens(
+                    name=project_name,
+                    tokens=_new_token_counts(),
+                    message_count=0,
+                    cost_usd=0.0,
+                    sessions=[],
+                ),
+            )
+
+            _add_entry_to_counts(project.tokens, entry)
+            project.message_count += 1
+            project.cost_usd = round(
+                project.cost_usd + _entry_cost(entry, self.pricing_calculator), 6
+            )
+
+            identifier = entry.request_id or entry.message_id
+            if identifier:
+                project_sessions[project_name].add(identifier)
+
+        for project_name, sessions in project_sessions.items():
+            grouped[project_name].sessions = sorted(sessions)
+
+        return dict(sorted(grouped.items()))
+
+    def aggregate_by_session(
+        self,
+        entries: list[UsageEntry],
+        session_map: dict[str, str] | None = None,
+    ) -> dict[str, SessionInfo]:
+        """Group entries by session id using best-effort mapping fallback."""
+        grouped_entries: dict[str, list[UsageEntry]] = defaultdict(list)
+
+        for entry in entries:
+            session_id = (
+                _resolve_entry_mapping(entry, session_map)
+                or entry.request_id
+                or entry.message_id
+                or "unknown-session"
+            )
+            grouped_entries[session_id].append(entry)
+
+        sessions: dict[str, SessionInfo] = {}
+        context_gauge = ContextGauge()
+        now = _utc_now()
+
+        for session_id, session_entries in grouped_entries.items():
+            ordered_entries = sorted(
+                session_entries, key=lambda item: _ensure_utc(item.timestamp)
+            )
+            start_time = _ensure_utc(ordered_entries[0].timestamp)
+            end_time = _ensure_utc(ordered_entries[-1].timestamp)
+            tokens = _new_token_counts()
+            models: set[str] = set()
+
+            for entry in ordered_entries:
+                _add_entry_to_counts(tokens, entry)
+                model_name = normalize_model_name(entry.model)
+                if model_name:
+                    models.add(model_name)
+
+            sessions[session_id] = SessionInfo(
+                session_id=session_id,
+                project="unknown",
+                models=sorted(models),
+                start_time=start_time,
+                end_time=end_time,
+                tokens=tokens,
+                message_count=len(ordered_entries),
+                cost_usd=_total_cost(ordered_entries, self.pricing_calculator),
+                is_active=end_time >= (now - _ACTIVE_SESSION_WINDOW),
+                is_subagent=False,
+                context_size=context_gauge.get_context_size(ordered_entries),
+                entries=ordered_entries,
+            )
+
+        return dict(sorted(sessions.items()))
+
+
+class BurnRateCalculator:
+    """Calculate token velocity from usage entries and session blocks."""
+
+    def __init__(
+        self,
+        pricing_calculator: PricingCalculator | None = None,
+        block_calculator: BlockBurnRateCalculator | None = None,
+    ) -> None:
+        self.pricing_calculator = pricing_calculator or PricingCalculator()
+        self.block_calculator = block_calculator or BlockBurnRateCalculator()
+
+    def current_rate(
+        self, entries: list[UsageEntry], window_hours: float = 1.0
+    ) -> BurnRateInfo:
+        """Calculate the current burn rate over the most recent window."""
+        if not entries or window_hours <= 0:
+            return self._empty_burn_rate()
+
+        ordered_entries = sorted(entries, key=lambda item: _ensure_utc(item.timestamp))
+        window_end = _ensure_utc(ordered_entries[-1].timestamp)
+        window_start = window_end - timedelta(hours=window_hours)
+        window_entries = [
+            entry
+            for entry in ordered_entries
+            if _ensure_utc(entry.timestamp) >= window_start
+        ]
+
+        total_tokens = _total_tokens(window_entries)
+        total_cost = _total_cost(window_entries, self.pricing_calculator)
+        tokens_per_hour = total_tokens / window_hours
+        cost_per_hour = total_cost / window_hours
+
+        return BurnRateInfo(
+            tokens_per_hour=tokens_per_hour,
+            tokens_per_day=tokens_per_hour * 24,
+            cost_per_hour=cost_per_hour,
+            cost_per_day=cost_per_hour * 24,
+            baseline_tokens_per_day=None,
+            anomaly=False,
+            anomaly_ratio=None,
+        )
+
+    def baseline_rate(
+        self, entries: list[UsageEntry], weeks: int = 4
+    ) -> BurnRateInfo:
+        """Calculate the average daily burn rate over a trailing multi-week window."""
+        if not entries or weeks <= 0:
+            return self._empty_burn_rate()
+
+        ordered_entries = sorted(entries, key=lambda item: _ensure_utc(item.timestamp))
+        window_end = _ensure_utc(ordered_entries[-1].timestamp)
+        window_days = weeks * 7
+        window_start = window_end - timedelta(days=window_days)
+        window_entries = [
+            entry
+            for entry in ordered_entries
+            if _ensure_utc(entry.timestamp) >= window_start
+        ]
+
+        total_tokens = _total_tokens(window_entries)
+        total_cost = _total_cost(window_entries, self.pricing_calculator)
+        tokens_per_day = total_tokens / window_days
+        cost_per_day = total_cost / window_days
+
+        return BurnRateInfo(
+            tokens_per_hour=tokens_per_day / 24,
+            tokens_per_day=tokens_per_day,
+            cost_per_hour=cost_per_day / 24,
+            cost_per_day=cost_per_day,
+            baseline_tokens_per_day=tokens_per_day,
+            anomaly=False,
+            anomaly_ratio=None,
+        )
+
+    def is_anomalous(
+        self,
+        current: BurnRateInfo,
+        baseline: BurnRateInfo,
+        threshold: float = 2.0,
+    ) -> bool:
+        """Return True when current burn materially exceeds baseline."""
+        baseline_tokens_per_day = (
+            baseline.baseline_tokens_per_day
+            if baseline.baseline_tokens_per_day is not None
+            else baseline.tokens_per_day
+        )
+        if threshold <= 0 or baseline_tokens_per_day <= 0:
+            return False
+        return current.tokens_per_day > (threshold * baseline_tokens_per_day)
+
+    def calculate_burn_rate(self, block: SessionBlock) -> BurnRate | None:
+        """Compatibility wrapper for session-block burn rate calculations."""
+        return self.block_calculator.calculate_burn_rate(block)
+
+    def project_block_usage(self, block: SessionBlock) -> UsageProjection | None:
+        """Compatibility wrapper for session-block usage projection."""
+        return self.block_calculator.project_block_usage(block)
+
+    @staticmethod
+    def _empty_burn_rate() -> BurnRateInfo:
+        """Return a zero-valued burn rate object."""
+        return BurnRateInfo(
+            tokens_per_hour=0.0,
+            tokens_per_day=0.0,
+            cost_per_hour=0.0,
+            cost_per_day=0.0,
+            baseline_tokens_per_day=None,
+            anomaly=False,
+            anomaly_ratio=None,
+        )
+
+
+class ContextGauge:
+    """Track context size growth within a session.
+
+    Context size is approximated by summing all input-side tokens for each
+    assistant response: input_tokens + cache_read_tokens + cache_creation_tokens.
+    This represents the total tokens the model "saw" for that turn, which is
+    the closest proxy for the context window size at that point.
+    """
+
+    @staticmethod
+    def _context_tokens(entry: UsageEntry) -> int:
+        """Approximate context window size from an entry's input-side tokens."""
+        return entry.input_tokens + entry.cache_read_tokens + entry.cache_creation_tokens
+
+    def get_context_size(self, session_entries: list[UsageEntry]) -> int:
+        """Return the latest context-window approximation for a session."""
+        if not session_entries:
+            return 0
+
+        ordered_entries = sorted(
+            session_entries, key=lambda entry: _ensure_utc(entry.timestamp)
+        )
+        return self._context_tokens(ordered_entries[-1])
+
+    def get_context_progression(
+        self, session_entries: list[UsageEntry]
+    ) -> list[tuple[datetime, int]]:
+        """Return timestamped context growth points in UTC."""
+        return [
+            (_ensure_utc(entry.timestamp), self._context_tokens(entry))
+            for entry in sorted(
+                session_entries, key=lambda item: _ensure_utc(item.timestamp)
+            )
+        ]
+
+
+class CalibrationStore:
+    """Persist and query calibration points used to estimate token limits."""
+
+    def __init__(self, config_dir: Path | None = None) -> None:
+        self.config_dir = (
+            config_dir.expanduser()
+            if config_dir is not None
+            else Path.home() / ".config" / "token-track"
+        )
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        self.file_path = self.config_dir / "calibrations.json"
+
+    def save_calibration(
+        self,
+        percent: float,
+        pool: str,
+        tokens_consumed: int,
+        reset_time: datetime | None = None,
+    ) -> CalibrationPoint:
+        """Save a calibration point to disk."""
+        self._validate_pool(pool)
+        if percent <= 0:
+            raise ValueError("percent must be greater than 0")
+        if tokens_consumed < 0:
+            raise ValueError("tokens_consumed must be non-negative")
+
+        point = CalibrationPoint(
+            pool=pool,
+            percent=float(percent),
+            tokens_consumed=int(tokens_consumed),
+            timestamp=_utc_now(),
+            reset_time=_ensure_utc(reset_time) if reset_time is not None else None,
+        )
+
+        payload = self._load_payload()
+        payload.append(self._serialize_point(point))
+        self.file_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return point
+
+    def load_calibrations(self) -> dict[str, list[CalibrationPoint]]:
+        """Load calibration history grouped by pool."""
+        grouped: dict[str, list[CalibrationPoint]] = {
+            pool: [] for pool in sorted(_CALIBRATION_POOLS)
+        }
+
+        for item in self._load_payload():
+            point = self._deserialize_point(item)
+            if point is None:
+                continue
+            grouped.setdefault(point.pool, []).append(point)
+
+        for points in grouped.values():
+            points.sort(key=lambda point: point.timestamp)
+
+        return grouped
+
+    def estimate_limit(self, pool: str) -> int | None:
+        """Estimate a token limit from saved calibration points."""
+        self._validate_pool(pool)
+        points = self.load_calibrations().get(pool, [])
+        estimates = [
+            point.tokens_consumed / (point.percent / 100.0)
+            for point in points
+            if point.percent > 0
+        ]
+        if not estimates:
+            return None
+        return int(round(median(estimates)))
+
+    def get_usage_percent(self, tokens_used: int, pool: str) -> float | None:
+        """Estimate usage percent for a pool from the median inferred limit."""
+        estimated_limit = self.estimate_limit(pool)
+        if estimated_limit is None or estimated_limit <= 0:
+            return None
+        return (tokens_used / estimated_limit) * 100.0
+
+    def _load_payload(self) -> list[dict[str, Any]]:
+        """Read the raw calibration payload from disk."""
+        if not self.file_path.exists():
+            return []
+
+        try:
+            data = json.loads(self.file_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        return []
+
+    @staticmethod
+    def _serialize_point(point: CalibrationPoint) -> dict[str, Any]:
+        """Convert a calibration point to JSON-safe data."""
+        return {
+            "pool": point.pool,
+            "percent": point.percent,
+            "tokens_consumed": point.tokens_consumed,
+            "timestamp": point.timestamp.isoformat(),
+            "reset_time": _isoformat_or_none(point.reset_time),
+        }
+
+    def _deserialize_point(self, data: dict[str, Any]) -> CalibrationPoint | None:
+        """Convert stored JSON data into a calibration point."""
+        pool = data.get("pool")
+        if pool not in _CALIBRATION_POOLS:
+            return None
+
+        timestamp = self._parse_datetime(data.get("timestamp"))
+        if timestamp is None:
+            return None
+
+        try:
+            percent = float(data["percent"])
+            tokens_consumed = int(data["tokens_consumed"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+        return CalibrationPoint(
+            pool=pool,
+            percent=percent,
+            tokens_consumed=tokens_consumed,
+            timestamp=timestamp,
+            reset_time=self._parse_datetime(data.get("reset_time")),
+        )
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime | None:
+        """Parse an ISO datetime and normalize it to UTC."""
+        if not value or not isinstance(value, str):
+            return None
+
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+        return _ensure_utc(parsed)
+
+    @staticmethod
+    def _validate_pool(pool: str) -> None:
+        """Validate a calibration pool name."""
+        if pool not in _CALIBRATION_POOLS:
+            raise ValueError(
+                f"pool must be one of {', '.join(sorted(_CALIBRATION_POOLS))}"
+            )
 
 
 def analyze_usage(
-    hours_back: Optional[int] = 96,
-    use_cache: bool = True,
+    hours_back: int | None = None,
     quick_start: bool = False,
-    data_path: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Main entry point to generate response_final.json.
-
-    Algorithm redesigned to:
-    1. First divide all outputs into blocks
-    2. Save data about outputs (tokens in/out, cache, tokens by model, entries)
-    3. Only then check for limits
-    4. If limit is detected, add information that it occurred
-
-    Args:
-        hours_back: Only analyze data from last N hours (None = all data)
-        use_cache: Use cached data when available
-        quick_start: Use minimal data for quick startup (last 24h only)
-        data_path: Optional path to Claude data directory
-
-    Returns:
-        Dictionary with analyzed blocks
-    """
-    logger.info(
-        f"analyze_usage called with hours_back={hours_back}, use_cache={use_cache}, "
-        f"quick_start={quick_start}, data_path={data_path}"
-    )
-
-    if quick_start and hours_back is None:
-        hours_back = 24
-        logger.info("Quick start mode: loading only last 24 hours")
-    elif quick_start:
-        logger.info(f"Quick start mode: loading last {hours_back} hours")
-
-    start_time = datetime.now()
+    use_cache: bool = True,
+    data_path: str | None = None,
+) -> dict[str, Any]:
+    """Load usage data, build session blocks, and return CLI-friendly results."""
+    effective_hours = 24 if quick_start and hours_back is None else hours_back
     entries, raw_entries = load_usage_entries(
         data_path=data_path,
-        hours_back=hours_back,
-        mode=CostMode.AUTO,
+        hours_back=effective_hours,
+        mode=CostMode.AUTO if use_cache else CostMode.AUTO,
         include_raw=True,
     )
-    load_time = (datetime.now() - start_time).total_seconds()
-    logger.info(f"Data loaded in {load_time:.3f}s")
 
-    start_time = datetime.now()
-    analyzer = SessionAnalyzer(session_duration_hours=5)
+    analyzer = SessionAnalyzer()
     blocks = analyzer.transform_to_blocks(entries)
-    transform_time = (datetime.now() - start_time).total_seconds()
-    logger.info(f"Created {len(blocks)} blocks in {transform_time:.3f}s")
+
+    limits = analyzer.detect_limits(raw_entries) if raw_entries else []
+    for block in blocks:
+        block.limit_messages = []
+
+    for limit in limits:
+        for block in blocks:
+            if _is_limit_in_block_timerange(limit, block):
+                block.limit_messages.append(limit)
 
     calculator = BurnRateCalculator()
     _process_burn_rates(blocks, calculator)
 
-    limits_detected = 0
-    if raw_entries:
-        limit_detections = analyzer.detect_limits(raw_entries)
-        limits_detected = len(limit_detections)
-
-        for block in blocks:
-            block_limits = [
-                _format_limit_info(limit_info)
-                for limit_info in limit_detections
-                if _is_limit_in_block_timerange(limit_info, block)
-            ]
-            if block_limits:
-                block.limit_messages = block_limits
-
-    metadata: Dict[str, Any] = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "hours_analyzed": hours_back or "all",
-        "entries_processed": len(entries),
-        "blocks_created": len(blocks),
-        "limits_detected": limits_detected,
-        "load_time_seconds": load_time,
-        "transform_time_seconds": transform_time,
-        "cache_used": use_cache,
+    metadata = {
+        "hours_analyzed": effective_hours,
         "quick_start": quick_start,
+        "limits_detected": len(limits),
     }
-
-    result = _create_result(blocks, entries, metadata)
-    logger.info(f"analyze_usage returning {len(result['blocks'])} blocks")
-    return result
+    return _create_result(blocks, entries, metadata)
 
 
 def _process_burn_rates(
-    blocks: List[SessionBlock], calculator: BurnRateCalculator
+    blocks: list[SessionBlock], calculator: BurnRateCalculator
 ) -> None:
-    """Process burn rate data for active blocks."""
+    """Attach burn-rate snapshots and projections to active blocks."""
     for block in blocks:
-        if block.is_active:
-            burn_rate = calculator.calculate_burn_rate(block)
-            if burn_rate:
-                block.burn_rate_snapshot = burn_rate
-                projection = calculator.project_block_usage(block)
-                if projection:
-                    block.projection_data = {
-                        "totalTokens": projection.projected_total_tokens,
-                        "totalCost": projection.projected_total_cost,
-                        "remainingMinutes": projection.remaining_minutes,
-                    }
+        block.burn_rate_snapshot = None
+        block.projection_data = None
+
+        if not block.is_active:
+            continue
+
+        burn_rate = calculator.calculate_burn_rate(block)
+        block.burn_rate_snapshot = burn_rate
+        if burn_rate is None:
+            continue
+
+        projection = calculator.project_block_usage(block)
+        if projection is None:
+            continue
+
+        block.projection_data = {
+            "totalTokens": projection.projected_total_tokens,
+            "totalCost": projection.projected_total_cost,
+            "remainingMinutes": projection.remaining_minutes,
+        }
 
 
 def _create_result(
-    blocks: List[SessionBlock], entries: List[UsageEntry], metadata: Dict[str, Any]
-) -> Dict[str, Any]:
-    """Create the final result dictionary."""
-    blocks_data = _convert_blocks_to_dict_format(blocks)
-
-    total_tokens = sum(b.total_tokens for b in blocks)
-    total_cost = sum(b.cost_usd for b in blocks)
-
+    blocks: list[SessionBlock], entries: list[UsageEntry], metadata: dict[str, Any]
+) -> dict[str, Any]:
+    """Create the standard serialized analysis result."""
     return {
-        "blocks": blocks_data,
+        "blocks": _convert_blocks_to_dict_format(blocks),
         "metadata": metadata,
         "entries_count": len(entries),
-        "total_tokens": total_tokens,
-        "total_cost": total_cost,
+        "total_tokens": sum(block.total_tokens for block in blocks),
+        "total_cost": round(sum(block.cost_usd for block in blocks), 6),
     }
 
 
 def _is_limit_in_block_timerange(
-    limit_info: Dict[str, Any], block: SessionBlock
+    limit_info: dict[str, Any], block: SessionBlock
 ) -> bool:
-    """Check if limit timestamp falls within block's time range."""
-    limit_timestamp = limit_info["timestamp"]
+    """Return True when a limit event occurred during the block window."""
+    timestamp = limit_info.get("timestamp")
+    if not isinstance(timestamp, datetime):
+        return False
 
-    if limit_timestamp.tzinfo is None:
-        limit_timestamp = limit_timestamp.replace(tzinfo=timezone.utc)
-
-    return block.start_time <= limit_timestamp <= block.end_time
+    limit_time = _ensure_utc(timestamp)
+    return block.start_time <= limit_time <= block.end_time
 
 
-def _format_limit_info(limit_info: Dict[str, Any]) -> Dict[str, Any]:
-    """Format limit info for block assignment."""
+def _format_limit_info(limit_info: dict[str, Any]) -> dict[str, Any]:
+    """Serialize a limit event for CLI/API output."""
+    timestamp = limit_info.get("timestamp")
+    reset_time = limit_info.get("reset_time")
+
     return {
-        "type": limit_info["type"],
-        "timestamp": limit_info["timestamp"].isoformat(),
-        "content": limit_info["content"],
-        "reset_time": (
-            limit_info["reset_time"].isoformat()
-            if limit_info.get("reset_time")
-            else None
-        ),
+        "type": limit_info.get("type"),
+        "timestamp": _isoformat_or_none(timestamp)
+        if isinstance(timestamp, datetime)
+        else None,
+        "content": limit_info.get("content"),
+        "reset_time": _isoformat_or_none(reset_time)
+        if isinstance(reset_time, datetime)
+        else None,
     }
 
 
-def _convert_blocks_to_dict_format(blocks: List[SessionBlock]) -> List[Dict[str, Any]]:
-    """Convert blocks to dictionary format for JSON output."""
-    blocks_data: List[Dict[str, Any]] = []
+def _format_block_entries(entries: list[UsageEntry]) -> list[dict[str, Any]]:
+    """Serialize block entries for display."""
+    return [
+        {
+            "timestamp": _ensure_utc(entry.timestamp).isoformat(),
+            "inputTokens": entry.input_tokens,
+            "outputTokens": entry.output_tokens,
+            "cacheCreationTokens": entry.cache_creation_tokens,
+            "cacheReadInputTokens": entry.cache_read_tokens,
+            "costUSD": entry.cost_usd,
+            "model": entry.model,
+            "messageId": entry.message_id,
+            "requestId": entry.request_id,
+        }
+        for entry in sorted(entries, key=lambda item: _ensure_utc(item.timestamp))
+    ]
 
-    for block in blocks:
-        block_dict = _create_base_block_dict(block)
-        _add_optional_block_data(block, block_dict)
-        blocks_data.append(block_dict)
 
-    return blocks_data
+def _create_base_block_dict(block: SessionBlock) -> dict[str, Any]:
+    """Create the common serialized shape for a session block."""
+    visible_total_tokens = (
+        block.token_counts.input_tokens + block.token_counts.output_tokens
+    )
 
-
-def _create_base_block_dict(block: SessionBlock) -> Dict[str, Any]:
-    """Create base block dictionary with required fields."""
     return {
         "id": block.id,
         "isActive": block.is_active,
         "isGap": block.is_gap,
-        "startTime": block.start_time.isoformat(),
-        "endTime": block.end_time.isoformat(),
-        "actualEndTime": (
-            block.actual_end_time.isoformat() if block.actual_end_time else None
-        ),
+        "startTime": _ensure_utc(block.start_time).isoformat(),
+        "endTime": _ensure_utc(block.end_time).isoformat(),
+        "actualEndTime": _isoformat_or_none(block.actual_end_time),
         "tokenCounts": {
             "inputTokens": block.token_counts.input_tokens,
             "outputTokens": block.token_counts.output_tokens,
-            "cacheCreationInputTokens": block.token_counts.cache_creation_tokens,
+            "cacheCreationTokens": block.token_counts.cache_creation_tokens,
             "cacheReadInputTokens": block.token_counts.cache_read_tokens,
         },
-        "totalTokens": block.token_counts.input_tokens
-        + block.token_counts.output_tokens,
+        "totalTokens": visible_total_tokens,
         "costUSD": block.cost_usd,
         "models": block.models,
         "perModelStats": block.per_model_stats,
@@ -203,34 +710,57 @@ def _create_base_block_dict(block: SessionBlock) -> Dict[str, Any]:
     }
 
 
-def _format_block_entries(entries: List[UsageEntry]) -> List[Dict[str, Any]]:
-    """Format block entries for JSON output."""
-    return [
-        {
-            "timestamp": entry.timestamp.isoformat(),
-            "inputTokens": entry.input_tokens,
-            "outputTokens": entry.output_tokens,
-            "cacheCreationTokens": entry.cache_creation_tokens,
-            "cacheReadInputTokens": entry.cache_read_tokens,
-            "costUSD": entry.cost_usd,
-            "model": entry.model,
-            "messageId": entry.message_id,
-            "requestId": entry.request_id,
-        }
-        for entry in entries
-    ]
-
-
-def _add_optional_block_data(block: SessionBlock, block_dict: Dict[str, Any]) -> None:
-    """Add optional burn rate, projection, and limit data to block dict."""
-    if hasattr(block, "burn_rate_snapshot") and block.burn_rate_snapshot:
+def _add_optional_block_data(block: SessionBlock, block_dict: dict[str, Any]) -> None:
+    """Attach optional block fields when available."""
+    burn_rate = getattr(block, "burn_rate_snapshot", None)
+    if burn_rate is not None:
         block_dict["burnRate"] = {
-            "tokensPerMinute": block.burn_rate_snapshot.tokens_per_minute,
-            "costPerHour": block.burn_rate_snapshot.cost_per_hour,
+            "tokensPerMinute": burn_rate.tokens_per_minute,
+            "costPerHour": burn_rate.cost_per_hour,
         }
 
-    if hasattr(block, "projection_data") and block.projection_data:
-        block_dict["projection"] = block.projection_data
+    projection = getattr(block, "projection_data", None)
+    if projection is not None:
+        block_dict["projection"] = projection
 
-    if hasattr(block, "limit_messages") and block.limit_messages:
-        block_dict["limitMessages"] = block.limit_messages
+    limit_messages = getattr(block, "limit_messages", None)
+    if limit_messages:
+        block_dict["limitMessages"] = [
+            _format_limit_info(limit)
+            if any(isinstance(limit.get(key), datetime) for key in ("timestamp", "reset_time"))
+            else dict(limit)
+            for limit in limit_messages
+            if isinstance(limit, dict)
+        ]
+
+
+def _convert_blocks_to_dict_format(blocks: list[SessionBlock]) -> list[dict[str, Any]]:
+    """Serialize session blocks for consumer-facing output."""
+    serialized_blocks: list[dict[str, Any]] = []
+
+    for block in blocks:
+        block_dict = _create_base_block_dict(block)
+        _add_optional_block_data(block, block_dict)
+        serialized_blocks.append(block_dict)
+
+    return serialized_blocks
+
+
+@dataclass
+class _DayAccumulator:
+    """Internal daily aggregation state."""
+
+    tokens: TokenCounts = field(default_factory=TokenCounts)
+    by_model: dict[str, TokenCounts] = field(default_factory=dict)
+    by_project: dict[str, TokenCounts] = field(default_factory=dict)
+    message_count: int = 0
+    cost_usd: float = 0.0
+
+
+__all__ = [
+    "BurnRateCalculator",
+    "CalibrationStore",
+    "ContextGauge",
+    "TokenLedger",
+    "analyze_usage",
+]
