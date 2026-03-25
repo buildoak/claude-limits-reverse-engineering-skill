@@ -128,19 +128,28 @@ def _classify_model_family(model: str) -> str:
 class ComputeModel:
     """Map raw tokens to estimated compute units using calibrated weights.
 
-    The default formula (Formula A from calibration analysis) uses the
-    API rate-limit model: input + cache_creation counted at 1x, output at
-    5x, cache_read excluded, no per-model multiplier.  This showed the
-    best cross-validation score against real dashboard readings.
+    Active formula: **Formula E** (fitted 2026-03-25, 11 data points, MAE 0.57%).
+    CU = input*1 + output*5 + cache_creation*1 + cache_read*0.58
+    Weekly limit: 374,000,000 CU.
+
+    cache_read weight 0.58 reflects ~58% of fresh-input cost (KV-cache
+    memory-bandwidth cost on the server side).  Stable across the
+    0.45-0.65 sensitivity range.
+
+    Supersedes Formula A (cache_read=0, limit=178M) which ignored the
+    dominant token type entirely.
     """
 
-    # Token-type weights (default: API rate-limit model)
+    # Token-type weights — Formula E (2026-03-25)
     TOKEN_WEIGHTS: dict[str, float] = {
         "input": 1.0,
         "output": 5.0,
         "cache_creation": 1.0,
-        "cache_read": 0.0,
+        "cache_read": 0.58,
     }
+
+    # Weekly compute-unit budget (Formula E calibration)
+    WEEKLY_LIMIT: int = 374_000_000
 
     # Per-model multiplier (1.0 = no distinction)
     MODEL_WEIGHTS: dict[str, float] = {

@@ -1,0 +1,36 @@
+{
+  "active_model": "formula-e-v1",
+  "models": [
+    {
+      "id": "formula-a-v1",
+      "name": "Formula A",
+      "status": "superseded",
+      "date_range": { "start": "2026-03-24", "end": "2026-03-25" },
+      "params": {
+        "input_weight": 1.0,
+        "output_weight": 5.0,
+        "cache_creation_weight": 1.0,
+        "cache_read_weight": 0.0,
+        "weekly_limit": 178000000
+      },
+      "fit_quality": { "mae_pct": 0.93, "max_error_pct": 1.91, "n_points": 5 },
+      "superseded_by": "formula-e-v1",
+      "superseded_reason": "cache_read weight was zero; dominant token type ignored"
+    },
+    {
+      "id": "formula-e-v1",
+      "name": "Formula E",
+      "status": "active",
+      "date_range": { "start": "2026-03-25", "end": null },
+      "params": {
+        "input_weight": 1.0,
+        "output_weight": 5.0,
+        "cache_creation_weight": 1.0,
+        "cache_read_weight": 0.58,
+        "weekly_limit": 374000000
+      },
+      "fit_quality": { "mae_pct": 0.57, "max_error_pct": 1.14, "n_points": 11 },
+      "notes": "Cache reads are NOT free. Server-confirmed via JSONL (5-min TTL, server truth). Weight 0.58 = ~58% of fresh input cost (memory bandwidth for KV cache read). Stable across 0.45-0.65 range."
+    }
+  ]
+}

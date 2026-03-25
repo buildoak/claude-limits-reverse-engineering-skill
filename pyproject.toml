@@ -87,9 +87,9 @@ token-track = "claude_monitor.cli.main:main"
 claude-monitor = "claude_monitor.cli.main:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["reference/src"]
 include = ["claude_monitor*"]
-exclude = ["tests*", "src/tests*"]
+exclude = ["tests*", "reference/src/tests*"]
 
 [tool.setuptools.package-data]
 claude_monitor = ["py.typed"]
@@ -151,7 +151,7 @@ disable_error_code = [
 
 [tool.pytest.ini_options]
 minversion = "7.0"
-testpaths = ["src/tests"]
+testpaths = ["reference/src/tests"]
 python_files = ["test_*.py","*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
@@ -178,7 +178,7 @@ filterwarnings = [
 
 [tool.coverage.run]
 branch = true
-source = ["src/claude_monitor"]
+source = ["reference/src/claude_monitor"]
 omit = ["*/tests/*","*/test_*","*/__main__.py","*/conftest.py"]
 
 [tool.coverage.report]
