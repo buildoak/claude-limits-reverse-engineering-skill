@@ -113,6 +113,23 @@ Source code, documentation, model registry, and tests live under `reference/`:
 - `reference/doc/` -- Screenshots and assets
 - `reference/README.md` -- Upstream documentation
 
+## Rate Limit Event (API-native data source)
+
+Every Anthropic API response includes a `rate_limit_event` in the SSE stream with live utilization data.
+
+**Schema:** `{status, rateLimitType, utilization, resetsAt, isUsingOverage}`
+- `utilization` = 0.0-1.0 float (dashboard %). Only present above a threshold — absent at low usage.
+- Pools: `five_hour`, `seven_day`, `seven_day_opus`, `seven_day_sonnet`
+
+**Zero-cost local reads:**
+- SDK subagent JSONLs persist rate_limit_events: `~/.claude/projects/<path>/<session>/subagents/agent-*.jsonl`
+- Interactive CLI sessions: NOT persisted (in-memory only, statusline stdin)
+- Grep for `rate_limit_event` in recent JSONLs to get last known utilization without extra API calls
+
+**Statusline source:** `rate_limits.five_hour.used_percentage`, `rate_limits.seven_day.used_percentage`, `rate_limits.seven_day.resets_at` — fed via stdin.
+
+**Fallback:** `claude -p "hi"` forces a fresh event at negligible cost when JSONLs are stale.
+
 ## Off-Peak Promotions
 
 Anthropic runs periodic promotions that modify metering. These affect calibration validity.
