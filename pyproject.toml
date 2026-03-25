@@ -76,10 +76,10 @@ test = [
 
 
 [project.urls]
-homepage = "https://github.com/USER/claude-limits-reverse-engineering-skill"
-repository = "https://github.com/USER/claude-limits-reverse-engineering-skill.git"
-documentation = "https://github.com/USER/claude-limits-reverse-engineering-skill#readme"
-issues = "https://github.com/USER/claude-limits-reverse-engineering-skill/issues"
+homepage = "https://github.com/buildoak/claude-limits-reverse-engineering-skill"
+repository = "https://github.com/buildoak/claude-limits-reverse-engineering-skill.git"
+documentation = "https://github.com/buildoak/claude-limits-reverse-engineering-skill#readme"
+issues = "https://github.com/buildoak/claude-limits-reverse-engineering-skill/issues"
 upstream = "https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor"
 
 [project.scripts]
