@@ -29,7 +29,7 @@ class TestLastUsedParams:
     def test_init_default_config_dir(self) -> None:
         """Test initialization with default config directory."""
         last_used = LastUsedParams()
-        expected_dir = Path.home() / ".claude-monitor"
+        expected_dir = Path.home() / ".config" / "token-track"
         assert last_used.config_dir == expected_dir
         assert last_used.params_file == expected_dir / "last_used.json"
 

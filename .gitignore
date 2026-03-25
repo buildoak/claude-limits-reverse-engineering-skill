@@ -216,3 +216,7 @@ logs/
 # Local linting scripts
 lint*.py
 lint*.sh
+
+# Private calibration data and personal scripts
+.private/
+!.private/README.md

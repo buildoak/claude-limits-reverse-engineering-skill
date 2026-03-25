@@ -1,6 +1,11 @@
-# 🐛 Troubleshooting Guide - Claude Monitor v3.0.0
+> **Note:** This document is from the original upstream project (Claude-Code-Usage-Monitor by Maciek-roboblog).
+> For current documentation, see the [root README.md](../README.md).
 
-**⚠️ This guide is specifically for Claude Monitor v3.0.0** - If you're using an older version, please upgrade first.
+---
+
+# Troubleshooting Guide - Claude Monitor v3.0.0
+
+**This guide is specifically for Claude Monitor v3.0.0** - If you're using an older version, please upgrade first.
 
 ## 🚨 Quick Fixes
 

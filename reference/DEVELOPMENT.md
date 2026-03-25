@@ -1,4 +1,9 @@
-# 🚧 Development Status & Roadmap
+> **Note:** This document is from the original upstream project (Claude-Code-Usage-Monitor by Maciek-roboblog).
+> For current development status, see the [root README.md](../README.md).
+
+---
+
+# Development Status & Roadmap
 
 Current implementation status and planned features for Claude Code Usage Monitor v3.0.0+.
 

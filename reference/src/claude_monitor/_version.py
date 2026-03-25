@@ -20,10 +20,13 @@ def get_version() -> str:
         Version string (e.g., "3.0.0")
     """
     try:
-        return importlib.metadata.version("claude-monitor")
+        return importlib.metadata.version("token-track")
     except importlib.metadata.PackageNotFoundError:
-        # Fallback for development environments where package isn't installed
-        return _get_version_from_pyproject()
+        try:
+            return importlib.metadata.version("claude-monitor")
+        except importlib.metadata.PackageNotFoundError:
+            # Fallback for development environments where package isn't installed
+            return _get_version_from_pyproject()
 
 
 def _get_version_from_pyproject() -> str:
@@ -70,7 +73,7 @@ def get_package_info() -> Dict[str, Optional[str]]:
         Dictionary containing version, name, and metadata
     """
     try:
-        metadata = importlib.metadata.metadata("claude-monitor")
+        metadata = importlib.metadata.metadata("token-track")
         return {
             "version": get_version(),
             "name": metadata.get("Name"),
@@ -83,7 +86,7 @@ def get_package_info() -> Dict[str, Optional[str]]:
     except importlib.metadata.PackageNotFoundError:
         return {
             "version": _get_version_from_pyproject(),
-            "name": "claude-monitor",
+            "name": "token-track",
             "author": None,
             "author_email": None,
             "description": None,

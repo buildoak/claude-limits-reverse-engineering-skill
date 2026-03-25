@@ -1,4 +1,9 @@
-# 🎯 Claude Code Usage Monitor
+> **Note:** This README is from the original upstream project (Claude-Code-Usage-Monitor by Maciek-roboblog).
+> For current documentation, see the [root README.md](../README.md).
+
+---
+
+# Claude Code Usage Monitor
 [![PyPI Version](https://img.shields.io/pypi/v/claude-monitor.svg)](https://pypi.org/project/claude-monitor/)
 [![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)

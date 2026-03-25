@@ -29,7 +29,9 @@ Token usage tracker and limit reverse-engineering tool for Claude Code. Reads JS
 ## Activation
 
 ```bash
-cd /Users/otonashi/thinking/building/claude-limits-reverse-engineering-skill && source .venv/bin/activate
+cd /path/to/claude-limits-reverse-engineering-skill
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .
 ```
 
 Then run any `token-track` command below.

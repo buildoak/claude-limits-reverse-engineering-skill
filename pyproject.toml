@@ -5,14 +5,16 @@ requires = ["setuptools>=61.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "claude-monitor"
+name = "token-track"
 version = "3.1.0"
-description = "A real-time terminal monitoring tool for Claude Code token usage with advanced analytics and Rich UI"
+description = "Claude Code token usage tracking and limit reverse-engineering from local JSONL ground truth"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
-authors = [{ name = "Maciek", email = "maciek@roboblog.eu" }]
-maintainers = [{ name = "Maciek", email = "maciek@roboblog.eu" }]
+authors = [
+  { name = "Maciek", email = "maciek@roboblog.eu" },
+]
+maintainers = []
 keywords = [
   "ai", "analytics", "claude", "dashboard",
   "developer-tools", "monitoring", "rich",
@@ -74,13 +76,11 @@ test = [
 
 
 [project.urls]
-homepage = "https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor"
-repository = "https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor.git"
-documentation = "https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor#readme"
-issues = "https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor/issues"
-changelog = "https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor/blob/main/CHANGELOG.md"
-"Release Notes" = "https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor/releases"
-"Discussions" = "https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor/discussions"
+homepage = "https://github.com/USER/claude-limits-reverse-engineering-skill"
+repository = "https://github.com/USER/claude-limits-reverse-engineering-skill.git"
+documentation = "https://github.com/USER/claude-limits-reverse-engineering-skill#readme"
+issues = "https://github.com/USER/claude-limits-reverse-engineering-skill/issues"
+upstream = "https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor"
 
 [project.scripts]
 token-track = "claude_monitor.cli.main:main"

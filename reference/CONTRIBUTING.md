@@ -1,4 +1,9 @@
-# 🤝 Contributing Guide
+> **Note:** This document is from the original upstream project (Claude-Code-Usage-Monitor by Maciek-roboblog).
+> For current contributing guidelines, see the [root README.md](../README.md).
+
+---
+
+# Contributing Guide
 
 Welcome to the Claude Code Usage Monitor project! We're excited to have you contribute to making this tool better for everyone.
 
