@@ -81,3 +81,7 @@ token-track calibrate --pool weekly-all --percent 52 --timestamp 2026-03-25T12:2
 ```
 
 Open an issue or pull request with that JSON payload plus the screenshot. Redact account identifiers if needed. The point is to preserve a trustworthy `(timestamp, pool, percent, token snapshot)` record so the next refit has better range and less folklore.
+
+## Built on
+
+This project is forked from [Claude-Code-Usage-Monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor) by [Maciek-roboblog](https://github.com/Maciek-roboblog). The original tool provides the JSONL parsing, session detection, and Rich terminal output that this project builds on. The reverse-engineering layer -- compute unit formulas, calibration store, model registry, and the discovery that cache reads are not free -- is new.
