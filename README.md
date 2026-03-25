@@ -62,6 +62,34 @@ The model registry lives at `reference/models/registry.json`. It tracks formula 
 
 There are separate meters to model. Weekly usage is split into two independent pools: `weekly-all` for all models and `weekly-sonnet` for the Sonnet-only bucket. The CLI also supports a `session` pool for the `5-hour` rolling session meter. Current operational assumptions are a weekly reset at Friday `05:00 UTC` and session usage measured on a rolling `5-hour` window.
 
+## Automated monitoring
+
+The JSONL files give you everything except live utilization percentages. Those come from a different channel: the `rate_limit_event` in Anthropic's SSE stream. The SDK suppresses this event before writing JSONL, so it never appears in `~/.claude/projects/`. It also cannot be queried — there is no separate endpoint.
+
+The two zero-cost ways to see it:
+
+**`/usage` command** — type `/usage` mid-session in the interactive CLI. Shows session %, weekly %, and sonnet % for the current moment. Cannot be scripted.
+
+**Statusline stdin** — every turn in an interactive session, Claude Code pipes the full render state to the statusline command via stdin. That payload includes `rate_limits.five_hour.used_percentage`, `rate_limits.seven_day.used_percentage`, and their `resets_at` timestamps.
+
+A one-line addition to your statusline script converts this into a persistent log:
+
+```bash
+input=$(cat)
+# ... rest of your statusline ...
+echo "$input" | jq -c '{ts: now|todate, five_h: .rate_limits.five_hour.used_percentage, seven_d: .rate_limits.seven_day.used_percentage, resets_5h: .rate_limits.five_hour.resets_at, resets_7d: .rate_limits.seven_day.resets_at} | select(.seven_d != null)' >> ~/.claude/rate-limit-log.jsonl 2>/dev/null
+```
+
+The `select(.seven_d != null)` guard filters renders where the field is absent — the server only sends utilization above certain thresholds (roughly 75%/50%/25% for 7-day depending on time-of-week conditions, 90% for the 5-hour session pool). Below those thresholds the field is simply missing, not zero.
+
+The resulting `~/.claude/rate-limit-log.jsonl` is a JSONL timeseries that updates on every turn at zero cost. Each line looks like:
+
+```json
+{"ts":"2026-03-25T10:14:02Z","five_h":0.43,"seven_d":0.77,"resets_5h":"2026-03-25T14:30:00Z","resets_7d":"2026-03-28T05:00:00Z"}
+```
+
+Limitation: fires only in interactive sessions. Headless subagent calls do not trigger the statusline, so background workers are invisible to this log.
+
 ## Current limitations
 The current model is good enough to reason about weekly usage and compare candidate formulas. It is not full observability.
 

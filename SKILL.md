@@ -121,14 +121,38 @@ Every Anthropic API response includes a `rate_limit_event` in the SSE stream wit
 - `utilization` = 0.0-1.0 float (dashboard %). Only present above a threshold — absent at low usage.
 - Pools: `five_hour`, `seven_day`, `seven_day_opus`, `seven_day_sonnet`
 
-**Zero-cost local reads:**
-- SDK subagent JSONLs persist rate_limit_events: `~/.claude/projects/<path>/<session>/subagents/agent-*.jsonl`
-- Interactive CLI sessions: NOT persisted (in-memory only, statusline stdin)
-- Grep for `rate_limit_event` in recent JSONLs to get last known utilization without extra API calls
+**Persistence reality (corrected):**
+- `rate_limit_event` is NOT persisted to JSONL files — neither subagent nor interactive session logs contain it.
+- The Claude Code SDK explicitly suppresses it before yielding to consumers: `return { type: "ignored" }`.
+- Earlier notes claiming "SDK subagent JSONLs persist rate_limit_events" were WRONG.
 
-**Statusline source:** `rate_limits.five_hour.used_percentage`, `rate_limits.seven_day.used_percentage`, `rate_limits.seven_day.resets_at` — fed via stdin.
+**How the data surfaces (zero cost):**
 
-**Fallback:** `claude -p "hi"` forces a fresh event at negligible cost when JSONLs are stale.
+1. `/usage` interactive command — displays live session %, weekly %, sonnet % mid-session. Interactive-only, cannot be scripted.
+
+2. Statusline stdin — on every turn in interactive/TG sessions, the statusline command receives the full state payload via stdin. This includes:
+   - `rate_limits.five_hour.used_percentage`
+   - `rate_limits.seven_day.used_percentage`
+   - `rate_limits.five_hour.resets_at`
+   - `rate_limits.seven_day.resets_at`
+
+**Statusline logger (recommended monitoring path):**
+
+Patch `~/.claude/statusline.sh` (or whatever `CLAUDE_STATUSLINE_CMD` points to) to append rate limit data on every render:
+
+```bash
+input=$(cat)
+# ... existing statusline logic ...
+# Append rate limit data to log
+echo "$input" | jq -c '{ts: now|todate, five_h: .rate_limits.five_hour.used_percentage, seven_d: .rate_limits.seven_day.used_percentage, resets_5h: .rate_limits.five_hour.resets_at, resets_7d: .rate_limits.seven_day.resets_at} | select(.seven_d != null)' >> ~/.claude/rate-limit-log.jsonl 2>/dev/null
+```
+
+- `select(.seven_d != null)` filters renders where rate_limits isn't populated yet.
+- Fires on every turn — continuous timeseries at zero API cost.
+- Limitation: interactive sessions only. Headless subagent calls do not trigger the statusline.
+- Threshold: server only includes utilization percentages above certain levels (approximately 75%/50%/25% for 7-day depending on time conditions, 90% for 5-hour). Low usage = absent field, not zero.
+
+**Fallback:** `claude -p "hi"` forces a fresh event at negligible cost (surfaces in statusline stdin if running interactively).
 
 ## Off-Peak Promotions
 
