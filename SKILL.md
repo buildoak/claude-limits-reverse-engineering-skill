@@ -111,6 +111,20 @@ Source code, documentation, model registry, and tests live under `reference/`:
 - `reference/doc/` -- Screenshots and assets
 - `reference/README.md` -- Upstream documentation
 
+## Off-Peak Promotions
+
+Anthropic runs periodic promotions that modify metering. These affect calibration validity.
+
+**March 13–28, 2026 promotion:**
+- 5-hour session cap doubled during off-peak (weekdays outside 12:00–18:00 UTC + all weekends)
+- Mechanism: bonus zone above normal cap. Tokens within normal cap count toward weekly at full rate. Tokens in bonus zone (above normal cap) exempt from weekly.
+- NOT a flat 0.5× discount — weekly meter grows at the same rate during off-peak as during peak
+- Weekly calibration unaffected IF session usage stays below normal cap during off-peak periods
+- Session% calibration invalid during promotion (denominator is 2X, not X)
+- Post-promotion: re-validate formula with 3–5 fresh calibration points after March 28
+
+Contrast: Holiday 2025 promotion doubled weekly caps directly — different mechanism entirely.
+
 ## Coordinator Usage
 
 For quick status checks, dispatch a subagent to run `token-track report --days 1 --json` and parse the result.
