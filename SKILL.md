@@ -3,7 +3,7 @@ name: token-track
 description: >
   Claude Code token usage tracking and limit reverse-engineering.
   Daily/project/model breakdown, burn rate, context gauge, limit calibration.
-  Active model: Formula A (CU = Σ_model[mult × (inp×1.0 + out×5.0 + cc×1.25 + cr×0.1)], limit 599.2M CU/week).
+  Active model: Formula A (CU = Σ_model[mult × (inp×1.0 + out×5.0 + cc×1.25 + cr×0.1)], limit 527.6M CU/week).
 triggers:
   - usage
   - tokens
@@ -51,11 +51,11 @@ Failure to do this will make any calibration useless.
 
 ## Active Compute Model
 
-**Formula A** (API-pricing-anchored, active 2026-03-26, 18 calibration points, MAE 2.24%, max error 3.76%, R² 0.936, spanning 52%→83% usage)
+**Formula A** (API-pricing-anchored, active 2026-03-26, 20 calibration points, MAE 1.54%, max error 3.66%, R² 0.977, spanning 52%→94% usage, limit refitted to 527.6M CU after 2026-03-27 corrections)
 
 ```
 CU = Σ_model [ model_mult × (input×1.0 + output×5.0 + cache_creation×1.25 + cache_read×0.1) ]
-Weekly limit: 599,200,000 CU
+Weekly limit: 527,627,120 CU
 ```
 
 **Model multipliers** (derived from Anthropic API pricing ratios):
@@ -75,7 +75,7 @@ Weekly limit: 599,200,000 CU
 | cache_creation | 1.25 | API: 5-min TTL write price ($3.75/$3 for Sonnet) |
 | cache_read | 0.1 | API: cache read price ($0.30/$3 for Sonnet) |
 
-**Key insight:** All formula parameters except the weekly limit are derived directly from Anthropic's published API pricing ratios. One free parameter (limit = 599.2M CU), everything else is physics. No empirical curve-fitting of token weights needed.
+**Key insight:** All formula parameters except the weekly limit are derived directly from Anthropic's published API pricing ratios. One free parameter (limit = 527.6M CU, LS-fitted 2026-03-27), everything else is physics. No empirical curve-fitting of token weights needed.
 
 Model registry: `reference/models/registry.json`
 
@@ -142,6 +142,12 @@ Project attribution derived from directory path. Subagent entries in `subagents/
 Location: `~/.config/token-track/calibrations.json`
 
 Each calibration point records: pool, dashboard %, tokens consumed, per-model token snapshot, compute units, timestamp, and reset time. The tool uses median of inferred limits across all points for a pool.
+
+**Timezone hygiene — CRITICAL:**
+- All timestamps MUST be UTC. Store only UTC in the JSON.
+- BKK = UTC+7, Dubai = UTC+4. Do NOT mix these offsets when converting from local time.
+- When the user provides a timestamp with a city annotation (e.g., "09:25 BKK"), convert using the correct city offset before storing.
+- On 2026-03-27, 4 calibration points were corrected: 08:31/09:25/19:03/20:30 on 2026-03-25 had been logged using UTC+4 (Dubai) instead of UTC+7 (Bangkok). Correct UTC times are 05:31/06:25/16:03/17:30. This shifted the limit estimate from 599.2M to 527.6M CU.
 
 ## Reference
 

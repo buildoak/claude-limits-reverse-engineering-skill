@@ -128,34 +128,35 @@ def _classify_model_family(model: str) -> str:
 class ComputeModel:
     """Map raw tokens to estimated compute units using calibrated weights.
 
-    Active formula: **Formula E** (fitted 2026-03-25, 11 data points, MAE 0.57%).
-    CU = input*1 + output*5 + cache_creation*1 + cache_read*0.58
-    Weekly limit: 374,000,000 CU.
+    Active formula: **Formula A** (API-pricing-anchored, fitted 2026-03-27, 20 data points,
+    MAE 1.54%, max error 3.66%, R² 0.977, spanning 52%→94% usage).
+    CU = Σ_model [ model_mult × (input×1.0 + output×5.0 + cache_creation×1.25 + cache_read×0.1) ]
+    Weekly limit: 527,627,120 CU.
 
-    cache_read weight 0.58 reflects ~58% of fresh-input cost (KV-cache
-    memory-bandwidth cost on the server side).  Stable across the
-    0.45-0.65 sensitivity range.
+    Token-type weights derived from Anthropic API pricing ratios (Sonnet basis):
+    output/input = $15/$3 = 5x; cache_creation = $3.75/$3 = 1.25x; cache_read = $0.30/$3 = 0.1x.
+    Model multipliers from API price ratios: opus=$15/$3 input = 5/3 = 1.667x vs sonnet.
 
-    Supersedes Formula A (cache_read=0, limit=178M) which ignored the
-    dominant token type entirely.
+    The weekly limit is the single fitted parameter (LS fit on 20 calibration points).
+    Supersedes Formula E (cr=0.58, limit=374M) which used streaming-dedup-bugged data.
     """
 
-    # Token-type weights — Formula E (2026-03-25)
+    # Token-type weights — Formula A (API-pricing-anchored, 2026-03-27)
     TOKEN_WEIGHTS: dict[str, float] = {
         "input": 1.0,
         "output": 5.0,
-        "cache_creation": 1.0,
-        "cache_read": 0.58,
+        "cache_creation": 1.25,
+        "cache_read": 0.1,
     }
 
-    # Weekly compute-unit budget (Formula E calibration)
-    WEEKLY_LIMIT: int = 374_000_000
+    # Weekly compute-unit budget (Formula A calibration, LS-fitted 2026-03-27)
+    WEEKLY_LIMIT: int = 527_627_120
 
-    # Per-model multiplier (1.0 = no distinction)
+    # Per-model multiplier derived from API pricing ratios
     MODEL_WEIGHTS: dict[str, float] = {
-        "opus": 1.0,
+        "opus": 1.667,
         "sonnet": 1.0,
-        "haiku": 1.0,
+        "haiku": 0.333,
         "other": 1.0,
     }
 
